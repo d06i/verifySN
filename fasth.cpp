@@ -5,25 +5,34 @@
 #include <string>
 #include <vector>
 #include <chrono>
-#include <algorithm>
-#include <future>
-#include <mutex>
-#include <thread>
-#include <unordered_map>
+#include <algorithm> 
+#include <thread> 
+#include <functional>
 
 namespace fs = std::filesystem;
 
-constexpr int part_number = 100;
-std::mutex mtx;
+// You can change file part numbers. But hash also changes.
+constexpr int part_number = 32;
+uint64_t invalidHash = 0;
 
-inline uint64_t mix(uint64_t h) {
+// Measure elapsed time in function
+void measure(std::string funcName, std::function<void()> func) {
+  auto start = std::chrono::high_resolution_clock::now();
+  func();
+  auto end  = std::chrono::high_resolution_clock::now();
+  auto time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+  std::cout << funcName << " -> " << time << " ms.\n";
+}
+
+///////////////////// Fast-Hash algorithm -> https://github.com/ztanml/fast-hash /////////////////////////////
+uint64_t mix(uint64_t h) {
   h ^= h >> 23;
   h *= 0x2127599bf4325c37ULL;
   h ^= h >> 47;
   return h;
 }
 
-inline uint64_t fasthash64(const void *buf, size_t len, uint64_t seed) {
+uint64_t fasthash64(const void *buf, size_t len, uint64_t seed) {
   const uint64_t m = 0x880355f21e6d1965ULL;
   const uint64_t *pos = (const uint64_t *)buf;
   const uint64_t *end = pos + (len / 8);
@@ -61,43 +70,14 @@ inline uint64_t fasthash64(const void *buf, size_t len, uint64_t seed) {
 
   return mix(h);
 }
+/////////////////////////////////////////////////////////////////////////
 
-
-std::vector<uint64_t> calculatHashes(fs::path filename) {
-  
-  std::ifstream file(filename, std::ios::binary);
-  std::vector<uint8_t> f; 
-  f.reserve(part_number); 
-  std::vector<uint64_t> hashes;
-
-  if (!file.is_open()) {
-    std::cout << "File is not found!\n";
-    return;
-  }
-
-  uintmax_t filesize = fs::file_size(filename);
-  uintmax_t parts = filesize / part_number;
- 
- for (int i{0}; i <= part_number; i++) {
-    file.seekg(i * parts); 
-    f.emplace_back(file.get());
-  }
-
-  uint64_t hash = fasthash64(f.data(), f.size(), filesize);
-  hashes.push_back(hash);
-  return hashes;
-}
-
-std::string getHashV2(){
-  std::vector<uint64_t> hashVector;
-}
-
+//  Get hash of file.
 std::string getHash(fs::path filename) {
 
-  std::ifstream file(filename, std::ios::binary);
-  std::vector<uint8_t> f; 
-  f.reserve(part_number);
-  char character;
+  std::ifstream file(filename, std::ios::binary | std::ios::in);
+  std::vector<uint8_t> file_hash; 
+  file_hash.reserve(part_number); 
 
   if (!file.is_open()) {
     std::cout << "File is not found!\n";
@@ -106,161 +86,180 @@ std::string getHash(fs::path filename) {
 
   uintmax_t filesize = fs::file_size(filename);
   uintmax_t parts = filesize / part_number;
- 
- for (int i{0}; i <  part_number; i++) {
-    file.seekg(i * parts); 
-    f.push_back(file.get());
+
+ // If file is empty just send zero
+  if ( filesize == 0 )
+    return "0000000000000000";
+
+ // Get one char on file parts.
+  char buff[1024];
+  for (int i=0; i < part_number; i++){
+    file.seekg( i * parts );
+    file.read(buff, 1024);
+    file_hash.emplace_back( buff[0] );
   }
 
-  uint64_t hash = fasthash64(f.data(), f.size(), filesize);
+  uint64_t hash = fasthash64(file_hash.data(), file_hash.size(), filesize);
   file.close();
 
+  // Convert hash to hex
   std::stringstream stream;
   stream << std::setw(16) << std::setfill('0') << std::hex << std::uppercase
          << hash;
   return stream.str();
 }
 
+// Get hash and add to file
 void hashFile(fs::path filename, bool save = false) {
-  auto hash = getHash(filename);
-  
-  if (save) {
-   static std::ofstream hashes("hash.txt", std::ios::app);
 
-   if (!hashes.is_open()){
-    std::cout << "hash.txt create is failed!";
-    return;  } 
-    hashes << hash << " " << filename.string() << "\n";
-  } else {
-    std::cout << hash << " " << filename.string() << "\n";
+  auto hash = getHash(filename);
+
+  if (save) 
+  {
+   std::ofstream hashes("hash.txt", std::ios::app);
+
+    if (!hashes.is_open())
+    {
+      std::cout << "[-] Failed to create hash.txt\n";
+      return; 
+    } 
+
+      hashes << hash << " " << filename.string() << "\n";
   } 
+
+  else 
+    std::cout << hash << " " << filename.string() << "\n";
+ 
 } 
 
-void loadHash(std::vector<std::string>& hashes, std::vector<std::string>& filenames){ 
+// Get calculated hashes from hash.txt to memory.
+void loadHash(std::vector<std::string> &hashes, std::vector<std::string> &filenames){ 
+  
    std::ifstream hashesFile("hash.txt");
-    if (!hashesFile.is_open()) {
-        std::cerr << "Hash file not found!";
-    } 
+
+    if (!hashesFile.is_open()) 
+     {
+        std::cerr << "Hash file not found!\n";
+        return;
+     }
+  
     std::string tempHash, tempFilename, line; 
-      while(std::getline(hashesFile, line)){
+   
+   // Split the line into hash and filename.  
+      while(std::getline(hashesFile, line))
+      {
         std::istringstream ss(line);
         ss >> tempHash;
         std::getline( ss >> std::ws, tempFilename);
         hashes.push_back(tempHash);
         filenames.push_back(tempFilename);   
-    }
+      }
+
 }
 
-void compareV4(fs::path filename, std::vector<std::string>& hashes) { 
-    auto t = getHash(filename);
-    auto found = std::find( hashes.begin(), hashes.end(), t);
-    if (!(found != hashes.end())) 
-       std::cout << "[-] Invalid\tHASH: " << t << "\tFilename: " << filename.string() << "\n";
-}
- 
-int iteration = 0;
-int linesCount = 0;
+// Compare hash in the file with the calculated hash.
+void compare(fs::path filename, std::vector<std::string> &hashes) { 
 
-void allFiles(fs::path path, bool saveHashes = false) {
-  for (auto files : fs::recursive_directory_iterator(path)) {
-    if (files.is_regular_file())
-      hashFile(files, saveHashes);
+    auto hash = getHash(filename);
+    auto found = std::find( hashes.begin(), hashes.end(), hash);
+
+    if ( !(found != hashes.end()) )  
+        {
+       invalidHash++;
+       std::cout << "[-] Invalid\tHASH: " << hash << "\tFilename: " << filename.string() << "\n";
+        }
+}
+
+// Get hash of directory.
+void hashDirectory(fs::path path, bool saveHash = false) {
+
+  for ( auto &files : fs::recursive_directory_iterator(path) ) 
+    {
+      if (files.is_regular_file())
+        hashFile(files, saveHash);
     }
   }
 
-void allFilesV2(fs::path path){
+// Compare hash of directory.
+void compDirectory(fs::path path){
 
-  std::ofstream hashes("hash.txt");
-
-  if(!hashes.is_open()) throw std::runtime_error("File not created!\n");
-
-   for (auto files : fs::recursive_directory_iterator(path)) {
-    if (files.is_regular_file()){
-      auto hash = getHash(files);
-      hashes << hash <<  " " << files.path().string() << "\n";
-      }
-    }
-}
-
-void compDir(fs::path path){
   std::vector<std::string> hash, files;
   loadHash(hash, files);
-  for (auto& files : fs::recursive_directory_iterator(path)){
-    if(files.is_regular_file())
-    compareV4(files, hash);
-    iteration++;
-  } }
 
-void compDirV2(fs::path path) {
-    std::vector<std::string> hash, files;
-    loadHash(hash, files);
+  for ( auto& files : fs::recursive_directory_iterator(path) )
+      if(files.is_regular_file())
+        compare(files, hash);
 
-    std::vector<std::future<void>> futures;
-    
-    for (auto& files : fs::recursive_directory_iterator(path)) {
-        if (files.is_regular_file())
-         futures.emplace_back(std::async(std::launch::async, compareV4, files, std::ref(hash))); 
-    }
-    for (auto& future : futures)
-        future.wait();
-}  
-
+}
+ 
 void usage() { 
-  std::cout << "Usage: program.exe [options] file.\n"
+  std::cout << "Usage: program.exe [options] filepath.\n"
                 "\t-save : save hashes to hash.txt.\n"
                 "\t-compare: compare hash. \n";
   }
 
+
 int main(int argc, const char *argv[]) {
-  const std::string x =
+  
+  const std::string info =
       "################################################\n"
-      "#   Fast File Verification Tool by D06i        #\n"
+      "#   Fast File Verification Tool by d06i        #\n"
       "#                                              #\n"
       "#  It's your life, live it however you wanna   #\n" 
       "################################################\n";
 
-  std::cout << x << std::endl;
+  std::cout << info << std::endl;
 
   try {
-      auto start = std::chrono::high_resolution_clock::now();
-
-    if (argc == 2) {
+   
+   // List a hash file or directory
+    if (argc == 2) 
+    {
       fs::path file = argv[1];
-      if (fs::is_regular_file(file)) {
-        hashFile(file);
-      } else {
-        allFiles(file);
-      }
+      if (fs::is_regular_file(file))
+          hashFile(file);
+      else
+          hashDirectory(file);
     }
 
-    else if (argc == 3 && std::string(argv[1]) == "-save") {
+    // Save hash. 
+    else if (argc == 3 && std::string(argv[1]) == "-save")
+    {
       fs::path file = argv[2];
-      if (fs::is_regular_file(file)){
-        hashFile(file, true); 
-        std::cout << "[+] Hashes saved to hash.txt.";}
-      else if (fs::is_directory(file)) {
-        allFilesV2(file);
+
+      if (fs::is_regular_file(file))
+      {
+        hashFile(file, false); 
+        std::cout << "[+] Hashes saved to hash.txt.";
+      }
+
+      else if (fs::is_directory(file))
+       {
+      //  hashDirectory(file, true);
+        measure("Elapsed time", [&file](){ hashDirectory(file, true); });
         std::cout << "[+] Hashes saved to hash.txt.";
       }
     }
-
-    else if (argc == 3 && std::string(argv[1]) == "-compare") {
-      fs::path file = argv[2];
-        compDirV2(file);
+    
+    // Compare hash of directory
+    else if (argc == 3 && std::string(argv[1]) == "-compare") 
+    {
+      fs::path file = argv[2]; 
+      measure("Elapsed time", [&file](){ compDirectory(file); });
+      if(invalidHash == 0 )
+        std::cout << "All files OK!";
     }
 
-    else if (argc <= 1) {
-      usage();
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto time = std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
-    std::cout << "\nElapsed time: " << std::dec << time << " ms.";
+    // get help info
+    else if (argc <= 1) 
+         usage();
+    
 } catch (const std::exception &e) {
     std::cerr << e.what() << "\n[!] Check file or directory name!";
   }
 
-  std::cout << "\n\nCompared times: " << iteration << "\nLines Count: " << linesCount;
-    
+ if( invalidHash >= 1) 
+  std::cout << "\nInvalid hash count is " << invalidHash;
+
   return 0;
 }

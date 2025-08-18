@@ -8,12 +8,19 @@
 #include <algorithm>  
 #include <functional>
 #include <unordered_set>
-
+#include <future>
+#include <execution>
+ 
+#include "ui.hpp"
+ 
 namespace fs = std::filesystem;
+using HashPack = std::pair< std::unordered_set<std::string>, std::unordered_set<std::string> >;
 
 // You can change file part numbers. But hash also changes.
 constexpr int part_number = 32;
-uint64_t invalidHash = 0;
+uint64_t invalidHashCount = 0, emptyFileCount = 0, fileCount = 0; 
+
+UI ui;
 
 // Measure elapsed time in function
 void measure(const std::string& funcName, std::function<void()> func) {
@@ -76,12 +83,11 @@ uint64_t fasthash64(const void *buf, size_t len, uint64_t seed) {
 std::string getHash(const fs::path& filename) {
 
   std::ifstream file(filename, std::ios::binary | std::ios::in);
-  std::vector<uint8_t> file_hash; 
-  file_hash.reserve(part_number); 
+  std::vector<uint8_t> file_hash;  
 
   if (!file.is_open()) {
-    std::cout << "File is not found!\n";
-    return 0;
+      ui.setElement(MessageTypes::warning, "ERROR", "File is not found!");
+      return "";
   }
 
   uintmax_t filesize = fs::file_size(filename);
@@ -89,56 +95,70 @@ std::string getHash(const fs::path& filename) {
 
  // If file is empty just send zero
   if ( filesize == 0 )
-    return "0000000000000000";
+    return "Empty file.";
 
- // Get one char on file parts.
-  char c;
-  for (int i = 0; i < part_number; i++){
-    file.seekg( i * parts ); 
-    file.get(c);
-    file_hash.push_back( c );
+  if (filesize <= 4096) {
+      std::vector<unsigned char> temp(filesize, 0);
+      file.read(reinterpret_cast<char*>(temp.data()) , filesize);
+      file_hash.insert(file_hash.end(), temp.begin(), temp.end());
+  } else {
+      // Get one char on file parts.
+      unsigned char c;
+      for (int i = 0; i < part_number; i++) {
+          file.seekg(i * parts);
+          file.get(reinterpret_cast<char&>(c));
+          file_hash.push_back(static_cast<uint8_t>(c));
+      }
   }
+  file.close();
 
   // calculate the hash
   const uint64_t hash = fasthash64(file_hash.data(), file_hash.size(), filesize);
-  file.close();
-
+   
   // Convert hash to hex
   std::stringstream stream;
   stream << std::setw(16) << std::setfill('0') << std::hex << std::uppercase
          << hash;
   return stream.str();
-}
+} 
 
 // Get hash and add to file
 void hashFile(const fs::path& filename, bool save = false) {
 
   auto hash = getHash(filename);
 
-  if (save)   {
-   std::ofstream hashes("hash.txt", std::ios::app);
+  if (save) {
+      std::ofstream hashes("hash.txt", std::ios::app);
 
-    if (!hashes.is_open())  {
-      std::cout << "[-] Failed to create hash.txt\n";
-      return; 
-    } 
+      if (!hashes.is_open()) {
+          ui.setElement(MessageTypes::warning, "ERROR", "Failed to create hash.txt");  
+          return;
+      }
 
       hashes << hash << " " << filename.string() << "\n";
   } 
-
-  else 
-    std::cout << hash << " " << filename.string() << "\n";
- 
+  else {
+      if (hash == "Empty file.") {
+          ui.setElement(MessageTypes::empty, hash, filename.string() );
+          emptyFileCount++;
+      }
+      else 
+          ui.setElement(MessageTypes::normal, hash, filename.string());
+       
+  }
+      
 } 
 
 // Get calculated hashes from hash.txt to memory.
-void loadHash( std::unordered_set<std::string> &hashes, std::unordered_set<std::string> &filenames){ 
+HashPack loadHash(){ 
   
-   std::ifstream hashesFile("hash.txt");
+    std::unordered_set<std::string> hashes, filenames;
+
+    std::ifstream hashesFile("hash.txt");
 
     if (!hashesFile.is_open())  {
-        std::cerr << "Hash file not found!\n";
-        return;
+        ui.setElement(MessageTypes::warning, "ERROR", "Hash file not found!");
+        return {};
      }
   
     std::string tempHash, tempFilename, line; 
@@ -152,106 +172,109 @@ void loadHash( std::unordered_set<std::string> &hashes, std::unordered_set<std::
         filenames.insert(tempFilename);   
       }
 
+      return { std::move(hashes), std::move(filenames) };
 }
 
-void compare(const fs::path& filename, std::unordered_set<std::string> &hashes) { 
+void compare(const fs::path& filename, const std::unordered_set<std::string> &hashes, const std::unordered_set<std::string>& filenames) {
 
   auto hash = getHash(filename); 
+    
+  if (hash == "Empty file.")
+      return;
 
-  #if __cplusplus >= 202002
-      if ( not hashes.contains(hash))   {
-  #else
-      if ( hashes.find(hash) == hashes.end()  ) {
-  #endif
-     invalidHash++;
-     std::cerr << "[-] Invalid\tHASH: " << hash << "\tFilename: " << filename.string() << "\n";
-  }
+    if ( !hashes.contains(hash) || !filenames.contains( filename.string() ) )   {
+       invalidHashCount++;
+       ui.setElement(MessageTypes::invalid, hash, filename.string());
+      }
 
 } 
 
 // Get hash of directory.
 void hashDirectory(const fs::path& path, bool saveHash = false) {
+    
+    std::vector<fs::path> paths;
 
-  for ( const auto &files : fs::recursive_directory_iterator(path) ) 
-      if (files.is_regular_file())
-        hashFile(files, saveHash);
-  
-}
+    for (const auto& files : fs::recursive_directory_iterator(path))
+        if (files.is_regular_file()) {
+            fileCount++;
+            paths.push_back(files);
+        }
+            
+    std::for_each(std::execution::par, paths.begin(), paths.end(),
+        [saveHash](const auto& file) { hashFile(file, saveHash); }
+        );
 
-// Compare hash of directory.
-void compDirectory(const fs::path& path){
- 
-  std::unordered_set<std::string>  hash, filenames;
-  loadHash(hash, filenames);
-
-  for ( const auto& files : fs::recursive_directory_iterator(path) )
-      if(files.is_regular_file())
-        compare(files, hash);
+    ui.infos("Count of files: " + std::to_string(fileCount), "Empty files: " + std::to_string(emptyFileCount));
 
 }
  
-void usage() { 
-  std::cout << "Usage: program.exe [options] filepath.\n"
-                "\t-save : save hashes to hash.txt.\n"
-                "\t-compare: compare hash. \n";
+//  Compare hash of directory with parallel - experimental - 
+void compDirectory(const fs::path& path) {
+      
+    const auto [hash, filenames] = loadHash();
+    std::vector<fs::path> paths;
+
+    for (const auto& files : fs::recursive_directory_iterator(path))
+        if (files.is_regular_file())
+            paths.push_back(files);
+   
+    std::for_each(std::execution::par, paths.begin(), paths.end(),
+        [hash, filenames](const auto& file) { compare( file, hash, filenames ); }
+    );
+
 }
 
 int main(int argc, const char *argv[]) {
-  
-  const std::string info =
-      "################################################\n"
-      "#   Fast File Verification Tool by d06i        #\n"
-      "#                                              #\n"
-      "#  It's your life, live it however you wanna   #\n" 
-      "################################################\n";
-
-  std::cout << info << std::endl;
-
+    
   try {
-   
+
+      if (argc <= 1 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
+            ui.usage();
+            return 0;
+      }
+        
    // List a hash file or directory
-    if (argc == 2)   {
-      fs::path file = argv[1];
-      if (fs::is_regular_file(file))
-          hashFile(file);
-      else
-          hashDirectory(file);
-    }
-
-    // Save hash. 
-    else if (argc == 3 && std::string(argv[1]) == "-save") {
-      fs::path file = argv[2];
-
-      if (fs::is_regular_file(file))  {
-        hashFile(file, false); 
-        std::cout << "[+] Hashes saved to hash.txt.";
+      if (argc == 2) {
+          fs::path file = argv[1];
+          if (fs::is_regular_file(file))
+              hashFile(file);
+          else
+              hashDirectory(file, false);
       }
 
-      else if (fs::is_directory(file))  {
-      //  hashDirectory(file, true);
-        measure("Elapsed time", [&file](){ hashDirectory(file, true); });
-        std::cout << "[+] Hashes saved to hash.txt.";
-      }
-    }
-    
-    // Compare hash of directory
-    else if (argc == 3 && std::string(argv[1]) == "-compare")   {
-      fs::path file = argv[2]; 
-      measure("Elapsed time", [&file](){ compDirectory(file); });
-      if(invalidHash == 0 )
-        std::cout << "All files OK!";
-    }
+      // Save hash. 
+      else if (argc == 3 && (std::string(argv[1]) == "--save" || std::string(argv[1]) == "-s")) {
+          fs::path file = argv[2];
 
-    // get help info
-    else if (argc <= 1) 
-         usage();
+          if (fs::is_regular_file(file)) {
+              hashFile(file, false);
+              ui.setElement(MessageTypes::success, "OK!", "Hashes saved to hash.txt.");
+          }
+
+          else if (fs::is_directory(file)) {
+              measure("Elapsed time", [&file]() { hashDirectory(file, true); });
+              ui.setElement(MessageTypes::success, "OK!", "Hashes saved to hash.txt.");
+          }
+      }
+
+      // Compare hash of directory
+      else if (argc == 3 && (std::string(argv[1]) == "--compare" || std::string(argv[1]) == "-c")) {
+          fs::path file = argv[2];
+          measure("Elapsed time", [&file]() { compDirectory(file); });
+          if (invalidHashCount == 0)
+              ui.setElement(MessageTypes::success, "OK!", "All files OK!");
+      }
+
+      else {
+          std::cout << "Command not found! \n";
+      }
     
-} catch (const std::exception &e) {
-    std::cerr << e.what() << "\n[!] Check file or directory name!";
+} catch (const std::exception &e) { 
+    ui.setElement(MessageTypes::warning, "Warning!", e.what());
   }
 
- if( invalidHash >= 1) 
-  std::cout << "\nInvalid hash count is " << invalidHash;
+    if (invalidHashCount >= 1) 
+       ui.setElement(MessageTypes::warning, "Invalid Hash Count", std::to_string(invalidHashCount));
 
   return 0;
 }

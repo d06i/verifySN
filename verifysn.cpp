@@ -5,16 +5,14 @@
 #include <string>
 #include <vector>
 #include <chrono>
-#include <algorithm>  
-#include <functional>
+#include <algorithm>   
 #include <unordered_set>
 #include <future>
 #include <execution>
  
 #include "ui.hpp"
  
-namespace fs = std::filesystem;
-using HashPack = std::pair< std::unordered_set<std::string>, std::unordered_set<std::string> >;
+namespace fs = std::filesystem; 
 
 // You can change file part numbers. But hash also changes.
 constexpr int part_number = 32;
@@ -23,12 +21,14 @@ uint64_t invalidHashCount = 0, emptyFileCount = 0, fileCount = 0;
 UI ui;
 
 // Measure elapsed time in function
-void measure(const std::string& funcName, std::function<void()> func) {
+template <typename F>
+auto measure(const std::string& funcName, F&& func) {
   auto start = std::chrono::high_resolution_clock::now();
   func();
   auto end  = std::chrono::high_resolution_clock::now();
   auto time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-  std::cout << funcName << " -> " << time << " ms.\n";
+  // std::cout << funcName << " -> " << time << " ms.\n";
+  return time;
 }
 
 ///////////////////// Fast-Hash algorithm -> https://github.com/ztanml/fast-hash /////////////////////////////
@@ -82,11 +82,11 @@ uint64_t fasthash64(const void *buf, size_t len, uint64_t seed) {
 //  Get hash of file.
 std::string getHash(const fs::path& filename) {
 
-  std::ifstream file(filename, std::ios::binary | std::ios::in);
+  std::ifstream file(filename, std::ios::binary);
   std::vector<uint8_t> file_hash;  
 
   if (!file.is_open()) {
-      ui.setElement(MessageTypes::warning, "ERROR", "File is not found!");
+      ui.setElement(MessageTypes::warning, "ERROR", "File not found!");
       return "";
   }
 
@@ -131,7 +131,7 @@ void hashFile(const fs::path& filename, bool save = false) {
       std::ofstream hashes("hash.txt", std::ios::app);
 
       if (!hashes.is_open()) {
-          ui.setElement(MessageTypes::warning, "ERROR", "Failed to create hash.txt");  
+          ui.setElement(MessageTypes::warning, "ERROR", "Failed to open hash.txt");  
           return;
       }
 
@@ -150,9 +150,9 @@ void hashFile(const fs::path& filename, bool save = false) {
 } 
 
 // Get calculated hashes from hash.txt to memory.
-HashPack loadHash(){ 
+std::unordered_map<std::string, std::string>  loadHash(){
   
-    std::unordered_set<std::string> hashes, filenames;
+    std::unordered_map<std::string, std::string> hashmap;
 
     std::ifstream hashesFile("hash.txt");
 
@@ -168,25 +168,26 @@ HashPack loadHash(){
         std::istringstream ss(line);
         ss >> tempHash;
         std::getline( ss >> std::ws, tempFilename);
-        hashes.insert(tempHash);
-        filenames.insert(tempFilename);   
+        hashmap[tempHash] = tempFilename;
       }
 
-      return { std::move(hashes), std::move(filenames) };
+      return hashmap;
 }
 
-void compare(const fs::path& filename, const std::unordered_set<std::string> &hashes, const std::unordered_set<std::string>& filenames) {
+void compare(const fs::path& filename, const std::unordered_map<std::string, std::string>& hashmap ) {
 
-  auto hash = getHash(filename); 
+  const auto hash = getHash(filename); 
     
   if (hash == "Empty file.")
       return;
 
-    if ( !hashes.contains(hash) || !filenames.contains( filename.string() ) )   {
-       invalidHashCount++;
-       ui.setElement(MessageTypes::invalid, hash, filename.string());
-      }
-
+  auto it = hashmap.find(hash);
+    
+  if (it == hashmap.end()) {
+      invalidHashCount++;
+      ui.setElement(MessageTypes::invalid, hash, filename.string()); 
+  }
+   
 } 
 
 // Get hash of directory.
@@ -200,26 +201,26 @@ void hashDirectory(const fs::path& path, bool saveHash = false) {
             paths.push_back(files);
         }
             
-    std::for_each(std::execution::par, paths.begin(), paths.end(),
+    std::for_each( paths.begin(), paths.end(),
         [saveHash](const auto& file) { hashFile(file, saveHash); }
         );
 
-    ui.infos("Count of files: " + std::to_string(fileCount), "Empty files: " + std::to_string(emptyFileCount));
+    ui.infos("Number of files: " + std::to_string(fileCount), "Empty files: " + std::to_string(emptyFileCount));
 
 }
  
 //  Compare hash of directory with parallel - experimental - 
 void compDirectory(const fs::path& path) {
       
-    const auto [hash, filenames] = loadHash();
+    const auto hashmap = loadHash();
     std::vector<fs::path> paths;
 
     for (const auto& files : fs::recursive_directory_iterator(path))
         if (files.is_regular_file())
             paths.push_back(files);
    
-    std::for_each(std::execution::par, paths.begin(), paths.end(),
-        [hash, filenames](const auto& file) { compare( file, hash, filenames ); }
+    std::for_each( std::execution::par, paths.begin(), paths.end(),
+        [hashmap](const auto& file) { compare( file, hashmap ); }
     );
 
 }
@@ -248,33 +249,33 @@ int main(int argc, const char *argv[]) {
 
           if (fs::is_regular_file(file)) {
               hashFile(file, false);
-              ui.setElement(MessageTypes::success, "OK!", "Hashes saved to hash.txt.");
+              ui.setElement(MessageTypes::success, "Success", "Hashes saved to hash.txt.");
           }
 
           else if (fs::is_directory(file)) {
-              measure("Elapsed time", [&file]() { hashDirectory(file, true); });
-              ui.setElement(MessageTypes::success, "OK!", "Hashes saved to hash.txt.");
+              auto time = measure("Elapsed time", [&file]() { hashDirectory(file, true); });
+              ui.setElement(MessageTypes::success, "Success", "Hashes saved to hash.txt in " + std::to_string(time) + " ms." );
           }
       }
 
       // Compare hash of directory
       else if (argc == 3 && (std::string(argv[1]) == "--compare" || std::string(argv[1]) == "-c")) {
           fs::path file = argv[2];
-          measure("Elapsed time", [&file]() { compDirectory(file); });
+          auto time = measure("Elapsed time", [&file]() { compDirectory(file); });
           if (invalidHashCount == 0)
-              ui.setElement(MessageTypes::success, "OK!", "All files OK!");
+              ui.setElement(MessageTypes::success, "Success", "All files compared in " + std::to_string(time) + " ms." );
       }
 
-      else {
+      else 
           std::cout << "Command not found! \n";
-      }
+       
     
 } catch (const std::exception &e) { 
     ui.setElement(MessageTypes::warning, "Warning!", e.what());
   }
 
     if (invalidHashCount >= 1) 
-       ui.setElement(MessageTypes::warning, "Invalid Hash Count", std::to_string(invalidHashCount));
+       ui.setElement(MessageTypes::warning, "Number of invalid hashes", std::to_string(invalidHashCount));
 
   return 0;
 }

@@ -13,6 +13,7 @@ enum MessageTypes : uint8_t{
   
 class UI {
 private:
+
 	void render( Element element ) const {
 		auto screen = Screen::Create(
 			Dimension::Full(),
@@ -23,8 +24,7 @@ private:
 		screen.Print();
 
 	}
-
-	 
+	  
 public:
 
 	void setElement( const MessageTypes& type, const std::string& hash, const std::string filename ) const {
@@ -78,8 +78,8 @@ public:
 					  text("d06i") | center,
 					  separator(),
 					  text("Usage: program.exe [options] filepath.") | center,
-					  text("--save or -s : save hashes to hash.txt.") | center,
-					  text("--compare or -c : compare hash.") | center,
+					  text("--save or -s : save hashes to hash.txt.") ,
+					  text("--compare or -c : compare hash.") ,
 					}), ftxui::DOUBLE
 				)
 			}) | center | color(Color::Khaki3);

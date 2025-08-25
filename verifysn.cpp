@@ -7,8 +7,8 @@
 #include <chrono>
 #include <algorithm>   
 #include <unordered_set>
-#include <future>
-#include <execution>
+#include <future> 
+#include <format>
  
 #include "ui.hpp"
  
@@ -115,11 +115,8 @@ std::string getHash(const fs::path& filename) {
   // calculate the hash
   const uint64_t hash = fasthash64(file_hash.data(), file_hash.size(), filesize);
    
-  // Convert hash to hex
-  std::stringstream stream;
-  stream << std::setw(16) << std::setfill('0') << std::hex << std::uppercase
-         << hash;
-  return stream.str();
+  // Convert hash to hex 
+  return std::format("{:016X}", hash); 
 } 
 
 // Get hash and add to file
@@ -219,7 +216,7 @@ void compDirectory(const fs::path& path) {
         if (files.is_regular_file())
             paths.push_back(files);
    
-    std::for_each( std::execution::par, paths.begin(), paths.end(),
+    std::for_each( paths.begin(), paths.end(),
         [hashmap](const auto& file) { compare( file, hashmap ); }
     );
 

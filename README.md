@@ -37,5 +37,5 @@ cmake --build . --config Release
 ~~~
 
 ## Credits
- -  https://github.com/ztanml/fast-hash
+ -  https://github.com/ekpyron/xxhashct
  -  https://github.com/ArthurSonzogni/FTXUI 

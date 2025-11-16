@@ -14,7 +14,12 @@ enum MessageTypes : uint8_t{
 class UI {
 private:
 
+	mutable std::mutex ui_mtx;
+
 	void render( Element element ) const {
+
+		std::lock_guard<std::mutex> lock(ui_mtx);
+
 		auto screen = Screen::Create(
 			Dimension::Full(),
 			Dimension::Fit(element)

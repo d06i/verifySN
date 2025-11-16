@@ -9,14 +9,18 @@
 #include <unordered_set>
 #include <future> 
 #include <format>
- 
+#include <execution>
+
+#include "xxh64.hpp"
 #include "ui.hpp"
  
 namespace fs = std::filesystem; 
 
 // You can change file part numbers. But hash also changes.
-constexpr int part_number = 32;
-uint64_t invalidHashCount = 0, emptyFileCount = 0, fileCount = 0; 
+constexpr uint64_t max_part_number = 16;
+constexpr uint64_t part_size   = 4 * 1024; // per part size
+
+std::atomic<uint64_t> invalidHashCount = 0, emptyFileCount = 0, fileCount = 0;  
 
 UI ui;
 
@@ -26,59 +30,10 @@ auto measure(const std::string& funcName, F&& func) {
   auto start = std::chrono::high_resolution_clock::now();
   func();
   auto end  = std::chrono::high_resolution_clock::now();
-  auto time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-  // std::cout << funcName << " -> " << time << " ms.\n";
+  auto time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(); 
   return time;
 }
-
-///////////////////// Fast-Hash algorithm -> https://github.com/ztanml/fast-hash /////////////////////////////
-uint64_t mix(uint64_t h) {
-  h ^= h >> 23;
-  h *= 0x2127599bf4325c37ULL;
-  h ^= h >> 47;
-  return h;
-}
-
-uint64_t fasthash64(const void *buf, size_t len, uint64_t seed) {
-  const uint64_t m = 0x880355f21e6d1965ULL;
-  const uint64_t *pos = (const uint64_t *)buf;
-  const uint64_t *end = pos + (len / 8);
-  const unsigned char *pos2;
-  uint64_t h = seed ^ (len * m);
-  uint64_t v;
-
-  while (pos != end) {
-    v = *pos++;
-    h ^= mix(v);
-    h *= m;
-  }
-
-  pos2 = (const unsigned char *)pos;
-  v = 0;
-
-  switch (len & 7) {
-    case 7:
-      v ^= (uint64_t)pos2[6] << 48;
-    case 6:
-      v ^= (uint64_t)pos2[5] << 40;
-    case 5:
-      v ^= (uint64_t)pos2[4] << 32;
-    case 4:
-      v ^= (uint64_t)pos2[3] << 24;
-    case 3:
-      v ^= (uint64_t)pos2[2] << 16;
-    case 2:
-      v ^= (uint64_t)pos2[1] << 8;
-    case 1:
-      v ^= (uint64_t)pos2[0];
-      h ^= mix(v);
-      h *= m;
-  }
-
-  return mix(h);
-}
-/////////////////////////////////////////////////////////////////////////
-
+ 
 //  Get hash of file.
 std::string getHash(const fs::path& filename) {
 
@@ -87,34 +42,40 @@ std::string getHash(const fs::path& filename) {
 
   if (!file.is_open()) {
       ui.setElement(MessageTypes::warning, "ERROR", "File not found!");
-      return "";
+      throw std::runtime_error("Cannot open file");
   }
 
-  uintmax_t filesize = fs::file_size(filename);
-  uintmax_t parts = filesize / part_number;
+  uintmax_t filesize = fs::file_size(filename); 
 
  // If file is empty just send zero
   if ( filesize == 0 )
     return "Empty file.";
 
-  if (filesize <= 4096) {
+  if (filesize <= 64 * 1024) {
       std::vector<unsigned char> temp(filesize, 0);
       file.read(reinterpret_cast<char*>(temp.data()) , filesize);
       file_hash.insert(file_hash.end(), temp.begin(), temp.end());
   } else {
-      // Get one char on file parts.
-      unsigned char c;
-      for (int i = 0; i < part_number; i++) {
-          file.seekg(i * parts);
-          file.get(reinterpret_cast<char&>(c));
-          file_hash.push_back(static_cast<uint8_t>(c));
+ 
+    uint64_t interval = filesize / max_part_number;
+
+    for (int i = 0; i < max_part_number; i++) {
+        std::vector<unsigned char> temp(part_size, 0);
+        uint64_t curr_offset = i * interval;
+
+        file.seekg(curr_offset); // jump to offset
+
+        int read_size = std::min( part_size, filesize - curr_offset ); // get last part 
+        
+        file.read(reinterpret_cast<char*>( temp.data() ), read_size );
+        file_hash.insert( file_hash.end(), temp.begin(), temp.end() );
       }
   }
   file.close();
-
+ 
   // calculate the hash
-  const uint64_t hash = fasthash64(file_hash.data(), file_hash.size(), filesize);
-   
+  const uint64_t hash = xxh64::hash( reinterpret_cast<const char*>(file_hash.data()), file_hash.size(), filesize);
+    
   // Convert hash to hex 
   return std::format("{:016X}", hash); 
 } 
@@ -125,6 +86,9 @@ void hashFile(const fs::path& filename, bool save = false) {
   auto hash = getHash(filename);
 
   if (save) {
+      static std::mutex file_mtx;
+      std::lock_guard<std::mutex> lock(file_mtx);
+
       std::ofstream hashes("hash.txt", std::ios::app);
 
       if (!hashes.is_open()) {
@@ -144,12 +108,12 @@ void hashFile(const fs::path& filename, bool save = false) {
        
   }
       
-} 
+}
 
 // Get calculated hashes from hash.txt to memory.
 std::unordered_map<std::string, std::string>  loadHash(){
   
-    std::unordered_map<std::string, std::string> hashmap;
+    std::unordered_map<std::string, std::string> hashmap{};
 
     std::ifstream hashesFile("hash.txt");
 
@@ -198,7 +162,7 @@ void hashDirectory(const fs::path& path, bool saveHash = false) {
             paths.push_back(files);
         }
             
-    std::for_each( paths.begin(), paths.end(),
+    std::for_each( std::execution::par, paths.begin(), paths.end(),
         [saveHash](const auto& file) { hashFile(file, saveHash); }
         );
 
@@ -216,7 +180,7 @@ void compDirectory(const fs::path& path) {
         if (files.is_regular_file())
             paths.push_back(files);
    
-    std::for_each( paths.begin(), paths.end(),
+    std::for_each( std::execution::par, paths.begin(), paths.end(),
         [hashmap](const auto& file) { compare( file, hashmap ); }
     );
 
